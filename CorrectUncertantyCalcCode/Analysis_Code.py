@@ -1,211 +1,160 @@
-#By Jacob Ellerbook
-
-
+# By Jacob Ellerbook
 
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib as mpl
+import os
 
 # ======================================================
 # Load Light Curve
 # ======================================================
-file_path = r"C:\Users\Jmell\Dropbox\Research File\Nova_targets\SMCN_FOLDER\SMCN_2002_10a\SMCN_2002_10a.dat"
+file_path = r"C:\Users\Jmell\Dropbox\Research File\Nova_targets\SMCN_FOLDER\SMCN_2001_10a\SMC_2001_10a.dat"
 readfile = np.loadtxt(file_path)
 
-readfile = readfile[readfile[:,1] != 99.999]  # Remove bad data points
-
-#lines_to_skip = range(345, 348)
-#mask = np.ones(readfile.shape[0], dtype=bool)
-#mask[lines_to_skip] = False
-#readfile = readfile[mask]
+# Remove bad data points
+readfile = readfile[readfile[:, 1] != 99.999]
 
 # Extract columns
-time = readfile[:, 0]     # JD
-Mag = readfile[:, 1]      # Magnitude
-Magerr = readfile[:, 2]   # Mag error
+time = readfile[:, 0]
+Mag = readfile[:, 1]
+Magerr = readfile[:, 2]
 
-# User-defined peak info
-tpeak_JD = 2452563.69365   # Observed peak JD
-m_peak = 12.212         # Observed peak mag
+# User-set values
+tpeak_JD = 2452206.61720
+m_peak = 11.912
+t2_JD = 2452248.84640
+manual_tpeak_before = None
 
-# Manual override for t_peak "before" uncertainty (days).
-# Set to None to use the bracket-based value.
-manual_tpeak_before = None  # or None
+# Shift for plotting
+time_shifted = time - tpeak_JD
 
+# ============================
+# Manual overrides for t_peak bracket
+# ============================
+manual_tpeak_prev = 2452192.67324
+manual_tpeak_next = 2452211.65131
 
-# This will manually set the brackets for tpeak before
-
-
-
-# User-defined t2 JD (set this manually)
-t2_JD = 2452570.38265    # Set your t2 JD here manually
-
-time_shifted = time - tpeak_JD  # Shift so peak = 0
+# Manual t2 bracket
+manual_t2_prev = 2452248.61823
+manual_t2_next = 2452250.58688
 
 # ======================================================
-# Calculate t_peak Uncertainties (bracket by previous/next observation)
+# t_peak UNCERTAINTY (using delta difference method)
 # ======================================================
-idx_peak = np.argmin(np.abs(time - tpeak_JD))
 
-if idx_peak == 0:
-    gap_before = 0.0
-    # distance from tpeak_JD to the next observation
-    gap_after = float(time[1] - tpeak_JD)
-elif idx_peak == len(time)-1:
-    # distance from tpeak_JD to the previous observation
-    gap_before = float(tpeak_JD - time[-2])
-    gap_after = 0.0
+i_after = np.searchsorted(time, tpeak_JD)
+i_before = i_after - 1
+
+if manual_tpeak_prev is not None and manual_tpeak_next is not None:
+    t_prev = manual_tpeak_prev
+    t_next = manual_tpeak_next
 else:
-    # bracket tpeak_JD by the neighbouring observation times (asymmetric)
-    gap_before = float(tpeak_JD - time[idx_peak-1])
-    gap_after  = float(time[idx_peak+1] - tpeak_JD)
-
-# Optional manual override
-if manual_tpeak_before is not None:
-    gap_before = float(manual_tpeak_before)
-
-# --- new: determine plotting-only bracket for t_peak that goes exactly between the two surrounding observations ---
-# Find indices that bracket the user tpeak_JD (so plotting spans from previous obs to next obs)
-idx_plot_after = np.searchsorted(time, tpeak_JD)
-idx_plot_before = idx_plot_after - 1
-
-if idx_plot_before < 0:
-    # tpeak before the first observation: use first two observations (or fallback)
-    tpeak_plot_before = 0.0
-    if len(time) > 1:
-        tpeak_plot_after = float(time[0] - tpeak_JD)
+    if i_before < 0:
+        t_prev = tpeak_JD
+        t_next = time[0]
+    elif i_after >= len(time):
+        t_prev = time[-1]
+        t_next = tpeak_JD
     else:
-        tpeak_plot_after = 0.0
-elif idx_plot_after >= len(time):
-    # tpeak after the last observation: use last two observations (or fallback)
-    if len(time) > 1:
-        tpeak_plot_before = float(tpeak_JD - time[-1])
+        t_prev = time[i_before]
+        t_next = time[i_after]
+
+# NEW method: difference of deltas, not full bracket
+delta_t_before = tpeak_JD - t_prev
+delta_t_after = t_next - tpeak_JD
+tpeak_err = 0.5 * (delta_t_after - delta_t_before)
+
+# Store these for plotting range (always absolute)
+tpeak_plot_before = abs(delta_t_before)
+tpeak_plot_after = abs(delta_t_after)
+
+# ======================================================
+# t2 UNCERTAINTY (manual bracket + delta difference method)
+# ======================================================
+
+if manual_t2_prev is not None and manual_t2_next is not None:
+    t2_prev = manual_t2_prev
+    t2_next = manual_t2_next
+else:
+    idx_t2 = np.argmin(np.abs(time - t2_JD))
+    if idx_t2 == 0:
+        t2_prev = t2_JD
+        t2_next = time[1]
+    elif idx_t2 == len(time)-1:
+        t2_prev = time[-2]
+        t2_next = t2_JD
     else:
-        tpeak_plot_before = 0.0
-    tpeak_plot_after = 0.0
-else:
-    # Normal case: bracket between time[idx_plot_before] and time[idx_plot_after]
-    tpeak_plot_before = float(tpeak_JD - time[idx_plot_before])
-    tpeak_plot_after  = float(time[idx_plot_after] - tpeak_JD)
+        t2_prev = time[idx_t2 - 1]
+        t2_next = time[idx_t2 + 1]
 
-# ======================================================
-# Calculate t2 Uncertainties (bracket by previous/next observation)
-# ======================================================
-idx_t2 = np.argmin(np.abs(time - t2_JD))
+# Your new delta-based method for internal uncertainty
+delta_t2_before = t2_JD - t2_prev
+delta_t2_after = t2_next - t2_JD
+t2_internal_err = 0.5 * (delta_t2_after - delta_t2_before)
 
-if idx_t2 == 0:
-    t2_gap_before = 0.0
-    t2_gap_after = float(time[1] - t2_JD)
-elif idx_t2 == len(time)-1:
-    t2_gap_before = float(t2_JD - time[-2])
-    t2_gap_after = 0.0
-else:
-    # use distances from the user t2_JD to neighbouring observation times
-    t2_gap_before = float(t2_JD - time[idx_t2-1])
-    t2_gap_after  = float(time[idx_t2+1] - t2_JD)
-
-# ensure non-negative (defensive)
-t2_gap_before = abs(t2_gap_before)
-t2_gap_after  = abs(t2_gap_after)
-
+# Final total quadrature
+t2_total_err = np.sqrt(t2_internal_err**2 + tpeak_err**2)
 t2_central = t2_JD - tpeak_JD
 
-# Debug prints to confirm what is being plotted for t2
-print(f"[debug] t2_JD = {t2_JD}")
-print(f"[debug] t2_central (days since peak) = {t2_central}")
-print(f"[debug] nearest observation for t2: time[idx_t2] = {time[idx_t2]} (idx={idx_t2}), days since peak = {time[idx_t2] - tpeak_JD}")
-
-# Asymmetric t2 uncertainties using quadrature (keep for terminal/calculation)
-t2_err_before = np.sqrt(t2_gap_before**2 + gap_before**2)
-t2_err_after  = np.sqrt(t2_gap_after**2 + gap_after**2)
-
-# Bracket distances (for plotting of quadrature, kept for printing)
-t2_bracket_before = t2_err_before
-t2_bracket_after  = t2_err_after
-
-# --- new: determine plotting-only bracket for t2 that goes exactly between the two surrounding observations ---
-idx_plot_after_t2 = np.searchsorted(time, t2_JD)
-idx_plot_before_t2 = idx_plot_after_t2 - 1
-
-if idx_plot_before_t2 < 0:
-    # t2 before first observation
-    t2_plot_before = 0.0
-    t2_plot_after = float(time[0] - t2_JD) if len(time) > 0 else 0.0
-elif idx_plot_after_t2 >= len(time):
-    # t2 after last observation
-    t2_plot_before = float(t2_JD - time[-1]) if len(time) > 0 else 0.0
-    t2_plot_after = 0.0
-else:
-    # Normal case: bracket between time[idx_plot_before_t2] and time[idx_plot_after_t2]
-    t2_plot_before = float(t2_JD - time[idx_plot_before_t2])
-    t2_plot_after  = float(time[idx_plot_after_t2] - t2_JD)
-
-# ensure non-negative
-t2_plot_before = abs(t2_plot_before)
-t2_plot_after  = abs(t2_plot_after)
-
 # ======================================================
-# Plot Light Curve
+# PLOT — Finalized Style Like Reference Image
 # ======================================================
+
+x_label_fontsize = 18
+y_label_fontsize = 18
+
 plt.figure(figsize=(16, 10))
 ax = plt.gca()
-ax.get_xaxis().get_major_formatter().set_useOffset(False)
-# Data points (single call; label only once so legend has one entry)
-ax.errorbar(time_shifted, Mag, yerr=Magerr, fmt='o', color='green', markersize=8, label="I-band data")
 
-# Add lines connecting all data points
-#plt.plot(time_shifted, Mag, 'g-', alpha=0.7, linewidth=1.5)
+ax.errorbar(time_shifted, Mag, yerr=Magerr, fmt='o',
+            color='green', markersize=6, label="I-band data")
+
+# Connect points with lines
+#ax.plot(time_shifted, Mag, color='green', linewidth=1.5, alpha=0.6)
+
 plt.gca().invert_yaxis()
 
-# Horizontal lines for peak and +2 mag
-plt.axhline(m_peak, color='b', linestyle='--', label=f"m_peak = {m_peak:.3f}")
-plt.axhline(m_peak + 2.0, color='r', linestyle='--', label=f"m_peak+2 = {m_peak + 2.0:.3f}")
+plt.axhline(m_peak, color='blue', linestyle='--', linewidth=1.5,
+            label=f"m_peak = {m_peak:.3f}")
+plt.axhline(m_peak + 2.0, color='red', linestyle='--', linewidth=1.5,
+            label=f"m_peak+2 = {m_peak + 2.0:.3f}")
 
-# Vertical lines for t_peak and t2
-plt.axvline(0, color='k', linestyle='--', label="t_peak = 0", linewidth=1.5, zorder=2)
-plt.axvline(t2_central, color='purple', linestyle='--', label=f"t2 = {t2_central:.2f} d", linewidth=2.0, zorder=2)
+plt.axvline(0, color='black', linestyle='--', linewidth=2, label="t_peak = 0")
+plt.axvspan(-tpeak_plot_before, tpeak_plot_after,
+            color='red', alpha=0.3, label="t_peak bracket")
 
-# Shaded asymmetric uncertainty regions
-# Use plotting-only t_peak brackets (span exactly between the two surrounding observations)
-plt.axvspan(-tpeak_plot_before, tpeak_plot_after, color='red', alpha=0.25, zorder=1)
-# Use plotting-only t2 brackets (span exactly between the two surrounding observations for t2)
-plt.axvspan(t2_central - t2_plot_before, t2_central + t2_plot_after, color='cyan', alpha=0.25, zorder=1)
-
-# ======================================================
-# Axis Formatting
-# ======================================================
-ax.set_yticks(np.arange(0, 30, 1))
-ax.set_yticks(np.arange(0, 30, 0.5), minor=True)
-ax.set_xticks(np.arange(-200, 2800, 10))
-ax.set_xticks(np.arange(-200, 2800, 5), minor=True)
-
-# User-configurable tick font settings
-axis_tick_fontsize = 14            # change this number to set tick label size
-axis_tick_fontfamily = "DejaVu Sans"  # change to any installed font (e.g. 'serif', 'Arial')
-
-# Apply tick font size and family to the axis numbering
-ax.tick_params(axis='both', which='both', labelsize=axis_tick_fontsize)
-for lbl in ax.get_xticklabels() + ax.get_yticklabels():
-    lbl.set_fontname(axis_tick_fontfamily)
+plt.axvline(t2_central, color='purple', linestyle='--', linewidth=2,
+            label=f"t2 = {t2_central:.2f} d")
+plt.axvspan(t2_central - t2_total_err, t2_central + t2_total_err,
+            color='blue', alpha=0.25, label="t2 uncertainty")
 
 plt.ylim(23, 10)
-plt.xlim(-20, 180)
-plt.xlabel('Days since peak brightness', fontsize=20)
-plt.ylabel('Optical Brightness (mag)', fontsize=20)
-plt.title('SMCN-2012-09a', fontsize=20)
-mpl.rcParams.update({'font.size': 16})
-plt.legend(loc='upper right', fontsize=14)
+plt.xlim(-60, 120)
+
+ax.set_xlabel("Days since peak brightness", fontsize=x_label_fontsize)
+ax.set_ylabel("Optical Brightness (mag)", fontsize=y_label_fontsize)
+ax.set_title("SMCN-2001-10a", fontsize=20)
+
+plt.legend(fontsize=13, loc='upper right')
+plt.grid(True, linestyle='--', alpha=0.4)
 plt.tight_layout()
 plt.show()
 
 # ======================================================
-# Print uncertainties
+# TXT OUTPUT OPTION
 # ======================================================
-print("---- Asymmetric uncertainties (quadrature for t2) ----")
-print(f"t_peak uncertainty: -{gap_before:.5f} / +{gap_after:.5f} days")
-# computed t2 uncertainties (quadrature) -- keep these as the terminal "calculated" values
-print(f"t2 uncertainty (computed, quadrature): -{t2_err_before:.5f} / +{t2_err_after:.5f} days")
-# plotted t2 brackets (span between the two neighbouring observations) -- what you show on the plot
-print(f"t2 plotted bracket (between neighbouring observations): -{t2_plot_before:.5f} / +{t2_plot_after:.5f} days")
-# (optional) also print the quadrature values used earlier for reference
-print(f"(Reference: quadrature t2 bracket used previously: -{t2_bracket_before:.5f} / +{t2_bracket_after:.5f} days)")
+save_txt = input("Would you like to export the uncertainties to TXT? (y/n): ").strip().lower()
+
+if save_txt == 'y':
+    txt_filename = "uncertainty_output.txt"
+    with open(txt_filename, "w") as f:
+        f.write("Uncertainty Output Report\n")
+        f.write("=========================\n")
+        f.write(f"t_peak JD: {tpeak_JD:.5f}\n")
+        f.write(f"t_peak bracket: {t_prev:.5f} to {t_next:.5f}\n")
+        f.write(f"t_peak uncertainty: ±{tpeak_err:.5f} days\n\n")
+        f.write(f"t2 JD: {t2_JD:.5f}\n")
+        f.write(f"t2 bracket (manual): {t2_prev:.5f} to {t2_next:.5f}\n")
+        f.write(f"t2 internal uncertainty: ±{t2_internal_err:.5f} days\n")
+        f.write(f"t2 total uncertainty (quadrature): ±{t2_total_err:.5f} days\n")
+    print(f"Saved: {txt_filename}")
