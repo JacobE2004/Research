@@ -5,9 +5,8 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 import os
 
-# ======================================================
-# Load Light Curve
-# ======================================================
+
+#this will load the light curve data for a .dat file
 file_path = r"C:\Users\Jmell\Dropbox\Research File\Nova_targets\SMCN_FOLDER\SMCN_2001_10a\SMC_2001_10a.dat"
 readfile = np.loadtxt(file_path)
 
@@ -25,23 +24,21 @@ m_peak = 11.912
 t2_JD = 2452248.84640
 manual_tpeak_before = None
 
-# Shift for plotting
+#shift for plotting
 time_shifted = time - tpeak_JD
 
-# ============================
-# Manual overrides for t_peak bracket
-# ============================
+
+#Manual overrides for t_peak bracket
+
 manual_tpeak_prev = 2452192.67324
 manual_tpeak_next = 2452211.65131
 
-# Manual t2 bracket
+#Manual t2 bracket
 manual_t2_prev = 2452248.61823
 manual_t2_next = 2452250.58688
 
-# ======================================================
-# t_peak UNCERTAINTY (using delta difference method)
-# ======================================================
 
+#t_peak UNCERTAINTY (using delta difference method)
 i_after = np.searchsorted(time, tpeak_JD)
 i_before = i_after - 1
 
@@ -59,7 +56,7 @@ else:
         t_prev = time[i_before]
         t_next = time[i_after]
 
-# NEW method: difference of deltas, not full bracket
+# difference of deltas, not full bracket
 delta_t_before = tpeak_JD - t_prev
 delta_t_after = t_next - tpeak_JD
 tpeak_err = 0.5 * (delta_t_after - delta_t_before)
@@ -68,10 +65,8 @@ tpeak_err = 0.5 * (delta_t_after - delta_t_before)
 tpeak_plot_before = abs(delta_t_before)
 tpeak_plot_after = abs(delta_t_after)
 
-# ======================================================
-# t2 UNCERTAINTY (manual bracket + delta difference method)
-# ======================================================
 
+# t2 UNCERTAINTY (manual bracket + delta difference method)
 if manual_t2_prev is not None and manual_t2_next is not None:
     t2_prev = manual_t2_prev
     t2_next = manual_t2_next
@@ -96,9 +91,9 @@ t2_internal_err = 0.5 * (delta_t2_after - delta_t2_before)
 t2_total_err = np.sqrt(t2_internal_err**2 + tpeak_err**2)
 t2_central = t2_JD - tpeak_JD
 
-# ======================================================
-# PLOT — Finalized Style Like Reference Image
-# ======================================================
+
+#PLOT Finalized Style Like Reference Image
+
 
 x_label_fontsize = 18
 y_label_fontsize = 18
@@ -109,7 +104,7 @@ ax = plt.gca()
 ax.errorbar(time_shifted, Mag, yerr=Magerr, fmt='o',
             color='green', markersize=6, label="I-band data")
 
-# Connect points with lines
+#Connect points with lines
 #ax.plot(time_shifted, Mag, color='green', linewidth=1.5, alpha=0.6)
 
 plt.gca().invert_yaxis()
@@ -140,9 +135,9 @@ plt.grid(True, linestyle='--', alpha=0.4)
 plt.tight_layout()
 plt.show()
 
-# ======================================================
-# TXT OUTPUT OPTION
-# ======================================================
+
+#This section is for making a TXT output option
+
 save_txt = input("Would you like to export the uncertainties to TXT? (y/n): ").strip().lower()
 
 if save_txt == 'y':
