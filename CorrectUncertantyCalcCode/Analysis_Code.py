@@ -4,108 +4,201 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import os
+import csv
+import io
 
 # ======================================================
 # Load Light Curve
 # ======================================================
-file_path = r"C:\Users\Jmell\Dropbox\Research File\Nova_targets\LMCN_Folder\LMCN_2018_05a-Light curve not made\download.csv"
+file_path = r"C:\Users\Jmell\Dropbox\Research File\Nova_targets\LMCN_Folder\LMCN_2020_11a\aavsodata_69ace0ffa9975.txt"
 
 ext = os.path.splitext(file_path)[1].lower()
 
-if ext == ".csv":
-    import csv
+def _is_float(x):
+    try:
+        float(str(x).strip())
+        return True
+    except:
+        return False
 
+def read_header_based_file(file_path):
+    """
+    Reads header-based files such as:
+    - AAVSO .csv
+    - AAVSO .txt that is really comma-separated
+    - other delimited text files with headers
 
-    # read entire file into memory so we can handle a couple of
-    # special lines (object name on first line, a header line prefixed
-    # with "#", etc.) before handing the remainder off to csv.DictReader.
-    raw_lines = []
-    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            # ignore empty lines completely
-            if not line.strip():
-                continue
-            raw_lines.append(line.rstrip("\n"))
+    Returns array with columns:
+    [time, filter, mag, err]
+    """
+    with open(file_path, "r", encoding="utf-8-sig", errors="ignore", newline="") as f:
+        text = f.read()
 
-    # drop an initial name/comment line if it doesn't look like data
-    # (no comma and does not start with a digit)
-    if raw_lines and "," not in raw_lines[0] and not raw_lines[0][0].isdigit():
-        raw_lines.pop(0)
+    if not text.strip():
+        raise ValueError("File is empty.")
 
-    # if the header line begins with '#', strip that off so csv
-    # sees clean field names
-    if raw_lines and raw_lines[0].lstrip().startswith("#"):
-        raw_lines[0] = raw_lines[0].lstrip().lstrip("#").lstrip()
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("File contains no non-empty lines.")
 
-    # hand the processed lines back to csv using StringIO
-    import io
+    # Find the header line
+    header_idx = None
+    for i, line in enumerate(lines):
+        test = line.lstrip("#").strip().lower()
+        if ("jd" in test or "hjd" in test) and ("mag" in test or "magnitude" in test):
+            header_idx = i
+            break
+
+    if header_idx is None:
+        raise ValueError("Could not find a valid header line containing JD/HJD and Magnitude.")
+
+    lines = lines[header_idx:]
+    lines[0] = lines[0].lstrip("#").strip()
+
+    sample = "\n".join(lines[:10])
+
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
+        delim = dialect.delimiter
+    except:
+        header_line = lines[0]
+        if "\t" in header_line:
+            delim = "\t"
+        elif "," in header_line:
+            delim = ","
+        elif ";" in header_line:
+            delim = ";"
+        elif "|" in header_line:
+            delim = "|"
+        else:
+            raise ValueError("Could not detect delimiter in header-based file.")
+
     rows = []
-    with io.StringIO("\n".join(raw_lines)) as f:
-        reader = csv.DictReader(f)
-        # normalise the fieldnames just as before, but now the leading '#'
-        # has already been removed if it existed
-        fieldnames = [fn.strip() for fn in (reader.fieldnames or [])]
-        fn_map = {fn.lower(): fn for fn in fieldnames}
+    reader = csv.reader(io.StringIO("\n".join(lines)), delimiter=delim)
+    all_rows = list(reader)
 
-        def _get(row, keys, default=""):
-            for k in keys:
-                k = k.lower()
-                if k in fn_map:
-                    return row.get(fn_map[k], default)
-            return default
+    if not all_rows:
+        raise ValueError("No rows found in header-based file.")
 
-        for r in reader:
-            t = _get(r, ["HJD", "JD", "JD(TCB)", "Julian Date", "julian_date", "jd_utc", "JD (UTC)"])
-            filt = _get(r, ["Filter", "Band", "Passband", "filter", "band"], default="NA")
-            m = _get(r, ["mag", "Magnitude", "magnitude", "Mag", "mag_value", "averagemag"])
-            me = _get(r, ["mag_err", "Uncertainty", "uncertainty", "Mag Error", "magerror", "MagErr", "error", "err"], default="0.05")
+    headers = [str(h).strip().lstrip("\ufeff") for h in all_rows[0]]
+    headers_lower = [h.lower() for h in headers]
 
-            # convert null/untrusted/empty magnitudes to NaN rather than
-            # outright dropping the row; the downstream numeric filtering
-            # will handle the NaNs gracefully but we preserve the time
-            # information in case that's useful.
-            if m and m.lower() not in ["untrusted", ""]:
-                if m.lower() == "null":
-                    m_value = "nan"
-                else:
-                    m_value = m
-                rows.append([t, filt, m_value, me])
+    def _find_col(possible_names, required=False, default=None):
+        for name in possible_names:
+            name_l = name.lower()
+            for i, h in enumerate(headers_lower):
+                if h == name_l:
+                    return i
+        if required:
+            raise ValueError(f"Required column not found. Tried: {possible_names}")
+        return default
+
+    # Prefer JD first, because some AAVSO files have blank HJD columns
+    time_idx = _find_col(
+        ["JD", "HJD", "JD(TCB)", "Julian Date", "julian_date", "jd_utc", "JD (UTC)"],
+        required=True
+    )
+    filt_idx = _find_col(
+        ["Filter", "Band", "Passband", "filter", "band"],
+        required=False,
+        default=None
+    )
+    mag_idx = _find_col(
+        ["mag", "Magnitude", "magnitude", "Mag", "mag_value", "averagemag"],
+        required=True
+    )
+    err_idx = _find_col(
+        ["mag_err", "Uncertainty", "uncertainty", "HQuncertainty",
+         "Mag Error", "magerror", "MagErr", "error", "err"],
+        required=False,
+        default=None
+    )
+
+    for r in all_rows[1:]:
+        if not r:
+            continue
+
+        if len(r) < len(headers):
+            r = r + [""] * (len(headers) - len(r))
+
+        t = str(r[time_idx]).strip() if time_idx is not None and time_idx < len(r) else ""
+        filt = str(r[filt_idx]).strip() if filt_idx is not None and filt_idx < len(r) else "NA"
+        m = str(r[mag_idx]).strip() if mag_idx is not None and mag_idx < len(r) else ""
+        me = str(r[err_idx]).strip() if err_idx is not None and err_idx < len(r) else "0.05"
+
+        m = m.lstrip("><")
+        me = me.lstrip("><")
+
+        if m.lower() in ["null", "untrusted", ""]:
+            m = "nan"
+
+        if me.lower() in ["null", "none", "nan", ""]:
+            me = "0.05"
+
+        rows.append([t, filt, m, me])
 
     raw = np.array(rows, dtype=str)
+    if raw.size == 0:
+        raise ValueError("Header parser found no data rows.")
+
     if raw.ndim == 1:
         raw = raw.reshape(1, -1)
 
-else:
-    raw = np.genfromtxt(file_path, dtype=str, comments='#', invalid_raise=False)
+    return raw
 
-if raw.size == 0:
+def read_numeric_text_file(file_path):
+    """
+    Reads plain numeric files with no header.
+    Expected columns:
+      0 = time
+      1 = magnitude
+      2 = uncertainty
+    """
+    readfile = np.loadtxt(file_path)
+
+    if readfile.ndim == 1:
+        readfile = readfile.reshape(1, -1)
+
+    if readfile.shape[1] < 3:
+        raise ValueError("Numeric text file must have at least 3 columns: time, mag, err.")
+
+    raw_time = readfile[:, 0].astype(str)
+    raw_mag = readfile[:, 1].astype(str)
+    raw_err = readfile[:, 2].astype(str)
+
+    raw = np.column_stack([raw_time, np.full_like(raw_time, "NA"), raw_mag, raw_err])
+    return raw
+
+# ======================================================
+# Choose parser automatically
+# ======================================================
+raw = None
+
+if ext in [".csv", ".txt", ".dat"]:
+    try:
+        raw = read_header_based_file(file_path)
+    except Exception as e:
+        print("Header-based parser failed, trying numeric fallback:")
+        print(e)
+        raw = read_numeric_text_file(file_path)
+else:
+    raw = read_numeric_text_file(file_path)
+
+if raw is None or raw.size == 0:
     raise ValueError("No data found in the file (file may be empty or comment-only).")
 
 if raw.ndim == 1:
     raw = raw.reshape(1, -1)
 
-def _is_float(x):
-    try:
-        float(x)
-        return True
-    except:
-        return False
-
-# Extract data based on file format
-if ext == ".csv":
-    raw_time = raw[:, 0]
-    raw_mag = np.char.lstrip(raw[:, 2], "><")
-    raw_err = np.char.lstrip(raw[:, 3], "><") if raw.shape[1] > 3 else np.full_like(raw_mag, "0.05")
-else:
-    readfile = np.loadtxt(file_path)
-    readfile = readfile[readfile[:, 1] != 99.999]
-    raw_time = readfile[:, 0].astype(str)
-    raw_mag = readfile[:, 1].astype(str)
-    raw_err = readfile[:, 2].astype(str)
+# ======================================================
+# Extract parsed columns
+# ======================================================
+raw_time = np.array([str(x).strip() for x in raw[:, 0]])
+raw_mag  = np.array([str(x).strip().lstrip("><") for x in raw[:, 2]])
+raw_err  = np.array([str(x).strip().lstrip("><") for x in raw[:, 3]]) if raw.shape[1] > 3 else np.full_like(raw_mag, "0.05")
 
 # Keep only rows where time and mag are numeric
-mask_numeric = (np.vectorize(_is_float)(raw_time) &
-                np.vectorize(_is_float)(raw_mag))
+mask_numeric = np.array([_is_float(t) and _is_float(m) for t, m in zip(raw_time, raw_mag)])
 
 raw_time = raw_time[mask_numeric]
 raw_mag = raw_mag[mask_numeric]
@@ -113,16 +206,11 @@ raw_err = raw_err[mask_numeric]
 
 time = raw_time.astype(float)
 Mag = raw_mag.astype(float)
-Magerr = raw_err.astype(float)
+Magerr = np.array([float(x) if _is_float(x) else 0.05 for x in raw_err], dtype=float)
 
-# if we managed to read rows but all mags are NaN the user probably
-# supplied a file with only null values; warn them and continue so the
-# downstream code does not crash but the plot will be empty.
 if Mag.size > 0 and np.all(np.isnan(Mag)):
     print("Warning: all magnitude entries are NaN (file may contain only 'null' values).")
 
-# if everything was stripped out by the numeric mask above there is
-# nothing to do, so error early.
 if time.size == 0:
     raise ValueError("No numeric time/magnitude data found in the file after parsing.")
 
@@ -171,12 +259,10 @@ else:
         t_prev = time[i_before]
         t_next = time[i_after]
 
-# NEW method: difference of deltas, not full bracket
 delta_t_before = tpeak_JD - t_prev
 delta_t_after = t_next - tpeak_JD
 tpeak_err = 0.5 * (delta_t_after - delta_t_before)
 
-# Store these for plotting range (always absolute)
 tpeak_plot_before = abs(delta_t_before)
 tpeak_plot_after = abs(delta_t_after)
 
@@ -192,24 +278,22 @@ else:
     if idx_t2 == 0:
         t2_prev = t2_JD
         t2_next = time[1]
-    elif idx_t2 == len(time)-1:
+    elif idx_t2 == len(time) - 1:
         t2_prev = time[-2]
         t2_next = t2_JD
     else:
         t2_prev = time[idx_t2 - 1]
         t2_next = time[idx_t2 + 1]
 
-# Your new delta-based method for internal uncertainty
 delta_t2_before = t2_JD - t2_prev
 delta_t2_after = t2_next - t2_JD
 t2_internal_err = 0.5 * (delta_t2_after - delta_t2_before)
 
-# Final total quadrature
 t2_total_err = np.sqrt(t2_internal_err**2 + tpeak_err**2)
 t2_central = t2_JD - tpeak_JD
 
 # ======================================================
-# PLOT — Finalized Style Like Reference Image
+# PLOT
 # ======================================================
 
 x_label_fontsize = 18
@@ -218,11 +302,15 @@ y_label_fontsize = 18
 plt.figure(figsize=(16, 10))
 ax = plt.gca()
 
-ax.errorbar(time_shifted, Mag, yerr=Magerr, fmt='o',
-            color='green', markersize=6, label=(f"{chosen_filter}-band data" if 'chosen_filter' in globals() else "Light curve data"))
-
-# Connect points with lines
-#ax.plot(time_shifted, Mag, color='green', linewidth=1.5, alpha=0.6)
+ax.errorbar(
+    time_shifted,
+    Mag,
+    yerr=Magerr,
+    fmt='o',
+    color='green',
+    markersize=6,
+    label=(f"{chosen_filter}-band data" if 'chosen_filter' in globals() else "Light curve data")
+)
 
 plt.gca().invert_yaxis()
 
@@ -270,4 +358,3 @@ if save_txt == 'y':
         f.write(f"t2 internal uncertainty: ±{t2_internal_err:.5f} days\n")
         f.write(f"t2 total uncertainty (quadrature): ±{t2_total_err:.5f} days\n")
     print(f"Saved: {txt_filename}")
-
