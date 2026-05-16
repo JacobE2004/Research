@@ -1,0 +1,10 @@
+Uncertainty Output Report
+=========================
+t_peak JD: 7683.73535
+t_peak bracket: 7600.64339 to 7683.73535
+t_peak uncertainty: ±-41.54598 days
+
+t2 JD: 7706.76789
+t2 bracket (manual): 7708.57735 to 7709.65231
+t2 internal uncertainty: ±2.34694 days
+t2 total uncertainty (quadrature): ±41.61222 days

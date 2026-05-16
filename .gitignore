@@ -1,0 +1,27 @@
+# Python environments
+myenv/
+venv/
+.venv/
+env/
+conda-env/
+
+# Python junk
+__pycache__/
+*.pyc
+
+# Installers / archives
+*.sh
+*.exe
+*.zip
+*.tar
+*.tar.gz
+
+# Logs / outputs
+*.log
+*.out
+*.err
+slurm-*.out
+
+# OS junk
+.DS_Store
+Thumbs.db

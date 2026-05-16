@@ -1,0 +1,45 @@
+MUON DETECTION DATA SUMMARY
+===========================
+
+Detector setup:
+BOTTOM = bottom detector pulse
+COINC  = hardware coincidence pulse from TOP + BOTTOM
+TOP is ignored because it is not actively readable right now.
+
+Timing source used: monotonic_ns
+
+Detector counts:
+detector
+BOTTOM    943
+TOP        16
+COINC       3
+
+Total run time: 135.875 seconds
+Total run time: 2.265 minutes
+
+Detector rates:
+BOTTOM: 6.940 events/s = 416.412 events/min
+TOP: 0.118 events/s = 7.065 events/min
+COINC: 0.022 events/s = 1.325 events/min
+
+Hardware coincidence / muon-candidate rate:
+3 COINC events in 135.875 seconds
+COINC rate = 1.325 muon candidates/min
+COINC / BOTTOM ratio = 3 / 943 = 0.003181
+
+Timing analysis:
+delta_t = t_COINC - t_BOTTOM
+Positive delta_t means BOTTOM was logged before COINC.
+Negative delta_t means COINC was logged before the nearest BOTTOM.
+Pair search window: 10000000 ns
+Coincidence acceptance window: 100000 ns
+
+Total COINC-BOTTOM pairs made: 3
+Pairs accepted within coincidence window: 0
+
+Delta-t statistics:
+Mean delta_t:   707902.000 ns
+Median delta_t: 694048.000 ns
+Std delta_t:    265578.151 ns
+Min delta_t:    449522.000 ns
+Max delta_t:    980136.000 ns

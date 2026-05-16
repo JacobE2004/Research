@@ -1,0 +1,4 @@
+coinc_event_number,bottom_event_number,coinc_timestamp,bottom_timestamp,coinc_pin,bottom_pin,coinc_t_ns,bottom_t_ns,delta_t_ns,delta_t_us,delta_t_ms,nearest_bottom_position,within_search_window,accepted_within_coincidence_window
+1,102,2026-05-01T14:31:04.918943,2026-05-01T14:31:04.918502,22,11,543096883911,543096434389,449522,449.522,0.449522,before,True,False
+2,144,2026-05-01T14:31:11.630137,2026-05-01T14:31:11.629450,22,11,549808077080,549807383032,694048,694.048,0.694048,before,True,False
+3,160,2026-05-01T14:31:13.650827,2026-05-01T14:31:13.649856,22,11,551828759200,551827779064,980136,980.136,0.980136,before,True,False

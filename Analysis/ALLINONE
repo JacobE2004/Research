@@ -1,0 +1,696 @@
+"""
+Nova Light Curve UI (Tkinter)
+--------------------------------
+A single-file Python app that replicates your current light-curve plotting script
+(t_peak at JD=tpeak_JD, m_peak horizontal, t2 at JD=t2_JD, shaded asymmetric
+uncertainty regions using both quadrature and bracket-between-observations logic)
+— but with a GUI to:
+
+• Open one or many data files and quickly switch between them
+• Autodetect columns (JD/HJD, Mag/Magnitude, MagErr/Uncertainty, Band/Filter)
+• Manually remap columns via dropdowns if autodetect guesses wrong
+• Optionally filter by Band/Filter (if present)
+• Choose and apply a sentinel “bad magnitude” value (default 99.999)
+• Enter t_peak JD, m_peak, t2 JD, and optional manual_tpeak_before override
+• Plot with Matplotlib embedded in Tkinter + print the uncertainty readout
+• Save the current plot as PNG
+
+Supported file types / formats (auto-parsed):
+• .csv (any delimiter — auto-sniffed)
+• .txt / .dat with whitespace or mixed delimiters; comment lines (#, !, ;) ignored
+• AAVSO-style CSVs with headers like JD/HJD, Magnitude, Uncertainty, Band, etc.
+  (non-numeric mags such as "<14.2" are treated as upper limits and dropped by default)
+
+Requires: Python 3.8+, matplotlib, pandas, numpy
+  pip install matplotlib pandas numpy
+
+Author: You (starting from your existing analysis logic)
+"""
+
+from __future__ import annotations
+import os
+import re
+import io
+import math
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+import matplotlib as mpl
+mpl.use("Agg")  # prevent backend conflicts on import; Tk backend is set by FigureCanvasTkAgg
+import matplotlib.pyplot as plt
+
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+
+# ------------------------------
+# Data containers
+# ------------------------------
+@dataclass
+class DataSet:
+    path: str
+    name: str
+    df: pd.DataFrame
+
+# ------------------------------
+# I/O utilities
+# ------------------------------
+COMMENT_PAT = re.compile(r"^\s*[#!;]")
+
+POSSIBLE_JD = ["JD", "HJD", "BJD", "Time", "time", "Julian Date", "julian_date"]
+POSSIBLE_MAG = ["Mag", "mag", "Magnitude", "magnitude", "Vmag", "vmag", "MAG"]
+POSSIBLE_ERR = ["MagErr", "magerr", "Uncertainty", "uncertainty", "e_mag", "Err", "Error", "MAGERR"]
+POSSIBLE_BAND = ["Band", "Filter", "band", "filter"]
+
+NUMERIC_COERCE = ["JD", "HJD", "BJD", "Mag", "mag", "Magnitude", "magnitude", "MagErr", "magerr",
+                  "Uncertainty", "uncertainty", "Err", "Error"]
+
+
+def _strip_comments(raw: str) -> str:
+    """Remove pure comment lines to help pandas sniff the dialect."""
+    lines = []
+    for line in raw.splitlines():
+        if COMMENT_PAT.match(line):
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _read_text_file(path: str) -> pd.DataFrame:
+    """Robust loader that tries multiple strategies to read a wide variety of files."""
+    with open(path, "r", errors="ignore") as f:
+        raw = f.read()
+
+    # Fast path: try pandas with sep auto-sniffing
+    try:
+        df = pd.read_csv(io.StringIO(raw), sep=None, engine="python")
+    except Exception:
+        df = None
+
+    if df is None or df.shape[1] <= 1:
+        # Strip full-line comments and try again
+        try:
+            cleaned = _strip_comments(raw)
+            df = pd.read_csv(io.StringIO(cleaned), sep=None, engine="python")
+        except Exception:
+            df = None
+
+    if df is None or df.shape[1] <= 1:
+        # Try whitespace-delimited
+        try:
+            df = pd.read_csv(io.StringIO(raw), delim_whitespace=True, engine="python", comment="#")
+        except Exception:
+            df = None
+
+    if df is None or df.empty:
+        # Ultimate fallback: numpy, then wrap into DataFrame
+        try:
+            arr = np.genfromtxt(io.StringIO(raw), comments="#;! ")
+            if arr.ndim == 1:
+                arr = arr.reshape(-1, 1)
+            cols = [f"col{i+1}" for i in range(arr.shape[1])]
+            df = pd.DataFrame(arr, columns=cols)
+        except Exception as e:
+            raise ValueError(f"Could not parse file: {os.path.basename(path)} — {e}")
+
+    # Normalize column names by stripping whitespace
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # Coerce numeric-like strings (e.g., "<14.2") to NaN; we'll drop non-numeric mags later
+    for c in df.columns:
+        if c in NUMERIC_COERCE:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    return df
+
+
+def autodetect_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
+    """Return a guess for column mapping: {jd, mag, err, band}."""
+    cols = list(df.columns)
+    lower = {c.lower(): c for c in cols}
+
+    def pick(cands: List[str]) -> Optional[str]:
+        # exact preferred
+        for c in cands:
+            if c in df.columns:
+                return c
+        # case-insensitive
+        for c in cands:
+            if c.lower() in lower:
+                return lower[c.lower()]
+        return None
+
+    jd = pick(POSSIBLE_JD)
+    mag = pick(POSSIBLE_MAG)
+    err = pick(POSSIBLE_ERR)
+    band = pick(POSSIBLE_BAND)
+
+    # If still no luck and we have 3+ numeric columns, assume first three are JD, Mag, MagErr
+    if jd is None or mag is None:
+        numeric_cols = [c for c in cols if pd.api.types.is_numeric_dtype(df[c])]
+        if len(numeric_cols) >= 2:
+            jd = jd or numeric_cols[0]
+            mag = mag or numeric_cols[1]
+            if len(numeric_cols) >= 3:
+                err = err or numeric_cols[2]
+    return {"jd": jd, "mag": mag, "err": err, "band": band}
+
+
+# ------------------------------
+# Analysis logic (matches your script)
+# ------------------------------
+
+def compute_brackets(time: np.ndarray, tpeak_JD: float, t2_JD: float,
+                      manual_tpeak_before: Optional[float]) -> Dict[str, float]:
+    # Find index near peak (closest observation)
+    idx_peak = int(np.argmin(np.abs(time - tpeak_JD)))
+    n = len(time)
+
+    if idx_peak == 0:
+        gap_before = 0.0
+        gap_after = float(time[1] - tpeak_JD) if n > 1 else 0.0
+    elif idx_peak == n - 1:
+        gap_before = float(tpeak_JD - time[n - 2]) if n > 1 else 0.0
+        gap_after = 0.0
+    else:
+        gap_before = float(tpeak_JD - time[idx_peak - 1])
+        gap_after  = float(time[idx_peak + 1] - tpeak_JD)
+
+    if manual_tpeak_before is not None and not math.isnan(manual_tpeak_before):
+        gap_before = float(manual_tpeak_before)
+
+    # Plotting-only bracket for t_peak (between neighbouring observations)
+    idx_plot_after = int(np.searchsorted(time, tpeak_JD))
+    idx_plot_before = idx_plot_after - 1
+
+    if idx_plot_before < 0:
+        tpeak_plot_before = 0.0
+        tpeak_plot_after = float(time[0] - tpeak_JD) if n > 0 else 0.0
+    elif idx_plot_after >= n:
+        tpeak_plot_before = float(tpeak_JD - time[-1]) if n > 0 else 0.0
+        tpeak_plot_after = 0.0
+    else:
+        tpeak_plot_before = float(tpeak_JD - time[idx_plot_before])
+        tpeak_plot_after  = float(time[idx_plot_after] - tpeak_JD)
+
+    # t2 gaps by neighbouring observations around the user t2_JD
+    idx_t2 = int(np.argmin(np.abs(time - t2_JD)))
+    if idx_t2 == 0:
+        t2_gap_before = 0.0
+        t2_gap_after  = float(time[1] - t2_JD) if n > 1 else 0.0
+    elif idx_t2 == n - 1:
+        t2_gap_before = float(t2_JD - time[n - 2]) if n > 1 else 0.0
+        t2_gap_after  = 0.0
+    else:
+        t2_gap_before = float(t2_JD - time[idx_t2 - 1])
+        t2_gap_after  = float(time[idx_t2 + 1] - t2_JD)
+
+    t2_gap_before = abs(t2_gap_before)
+    t2_gap_after  = abs(t2_gap_after)
+
+    t2_central = float(t2_JD - tpeak_JD)
+
+    # Quadrature asymmetric uncertainties for t2
+    t2_err_before = float(np.sqrt(t2_gap_before ** 2 + gap_before ** 2))
+    t2_err_after  = float(np.sqrt(t2_gap_after ** 2 + gap_after ** 2))
+
+    # Plotting-only bracket for t2 (between neighbouring observations)
+    idx_plot_after_t2 = int(np.searchsorted(time, t2_JD))
+    idx_plot_before_t2 = idx_plot_after_t2 - 1
+
+    if idx_plot_before_t2 < 0:
+        t2_plot_before = 0.0
+        t2_plot_after  = float(time[0] - t2_JD) if n > 0 else 0.0
+    elif idx_plot_after_t2 >= n:
+        t2_plot_before = float(t2_JD - time[-1]) if n > 0 else 0.0
+        t2_plot_after  = 0.0
+    else:
+        t2_plot_before = float(t2_JD - time[idx_plot_before_t2])
+        t2_plot_after  = float(time[idx_plot_after_t2] - t2_JD)
+
+    t2_plot_before = abs(t2_plot_before)
+    t2_plot_after  = abs(t2_plot_after)
+
+    return {
+        "gap_before": float(gap_before),
+        "gap_after": float(gap_after),
+        "tpeak_plot_before": float(tpeak_plot_before),
+        "tpeak_plot_after": float(tpeak_plot_after),
+        "t2_gap_before": float(t2_gap_before),
+        "t2_gap_after": float(t2_gap_after),
+        "t2_central": float(t2_central),
+        "t2_err_before": float(t2_err_before),
+        "t2_err_after": float(t2_err_after),
+        "t2_plot_before": float(t2_plot_before),
+        "t2_plot_after": float(t2_plot_after),
+    }
+
+
+# ------------------------------
+# Plotting
+# ------------------------------
+
+def make_plot(ax: plt.Axes,
+              time: np.ndarray, mag: np.ndarray, magerr: Optional[np.ndarray],
+              tpeak_JD: float, m_peak: float, t2_JD: float,
+              title: str,
+              brackets: Dict[str, float],
+              label: str = "data",
+              connect_lines: bool = False):
+    ax.clear()
+
+    # Shift time to days since peak
+    time_shifted = time - tpeak_JD
+
+    # Data points + error bars
+    yerr = magerr if magerr is not None else None
+    ax.errorbar(time_shifted, mag, yerr=yerr, fmt='o', markersize=6, label=label)
+
+    # Optional: connect observations with a line for easier visual interpolation (e.g., estimating t2)
+    if connect_lines:
+        ax.plot(time_shifted, mag)
+
+    # Invert Y (magnitudes)
+    ax.invert_yaxis()
+
+    # Horizontal lines for m_peak and m_peak + 2
+    ax.axhline(m_peak, linestyle='--', color='b', label=f"m_peak = {m_peak:.3f}")
+    ax.axhline(m_peak + 2.0, linestyle='--', color='r', label=f"m_peak+2 = {m_peak + 2.0:.3f}")
+
+    # Vertical lines for t_peak (0) and t2
+    t2_central = brackets["t2_central"]
+    ax.axvline(0, color='k', linestyle='--', label="t_peak = 0", linewidth=1.5, zorder=2)
+    ax.axvline(t2_central, color='purple', linestyle='--', label=f"t2 = {t2_central:.2f} d", linewidth=2.0, zorder=2)
+
+    # Shaded brackets (plotting-only)
+    ax.axvspan(-brackets["tpeak_plot_before"], brackets["tpeak_plot_after"], color='red', alpha=0.25, zorder=1)
+    ax.axvspan(t2_central - brackets["t2_plot_before"], t2_central + brackets["t2_plot_after"], color='cyan', alpha=0.25, zorder=1)
+
+    # Axis cosmetics akin to your script
+    ax.set_yticks(np.arange(0, 30, 1))
+    ax.set_yticks(np.arange(0, 30, 0.5), minor=True)
+    ax.set_xticks(np.arange(-200, 2800, 10))
+    ax.set_xticks(np.arange(-200, 2800, 5), minor=True)
+    ax.set_ylim(23, 10)
+    ax.set_xlim(-20, 180)
+
+    ax.set_xlabel('Days since peak brightness', fontsize=12)
+    ax.set_ylabel('Optical Brightness (mag)', fontsize=12)
+    ax.set_title(title, fontsize=14)
+    ax.legend(loc='upper right', fontsize=9)
+    ax.grid(True, which='both', alpha=0.15)
+
+
+# ------------------------------
+# Tkinter App
+# ------------------------------
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Nova Light Curve UI – t_peak/t2")
+        self.geometry("1300x760")
+        self.minsize(1100, 680)
+
+        self.datasets: List[DataSet] = []
+        self.current: Optional[DataSet] = None
+
+        # Large pop-out plot window state
+        self.popup_win = None
+        self.popup_ax = None
+        self.popup_canvas = None
+        self._last_plot_payload = None  # (jd, mag, magerr, tpeak_JD, m_peak, t2_JD, title, brackets, label, connect_lines)
+
+        self._build_ui()
+
+    # ---------- UI construction ----------
+    def _build_ui(self):
+        self.columnconfigure(1, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        left = ttk.Frame(self, padding=8)
+        left.grid(row=0, column=0, sticky="nsw")
+
+        right = ttk.Frame(self, padding=8)
+        right.grid(row=0, column=1, sticky="nsew")
+        right.rowconfigure(1, weight=1)
+        right.columnconfigure(0, weight=1)
+
+        # ---- Left: file controls ----
+        ttk.Label(left, text="Loaded Files", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
+
+        self.lb = tk.Listbox(left, height=10, width=36, exportselection=False)
+        self.lb.grid(row=1, column=0, sticky="nsew")
+        self.lb.bind("<<ListboxSelect>>", self._on_select_dataset)
+
+        btns = ttk.Frame(left)
+        btns.grid(row=2, column=0, pady=(6, 12), sticky="w")
+        ttk.Button(btns, text="Open file(s)", command=self.open_files).grid(row=0, column=0, padx=(0,6))
+        ttk.Button(btns, text="Remove", command=self.remove_selected).grid(row=0, column=1)
+
+        # Column mapping group
+        mapping = ttk.LabelFrame(left, text="Column Mapping")
+        mapping.grid(row=3, column=0, sticky="ew", pady=6)
+
+        self.jd_var = tk.StringVar()
+        self.mag_var = tk.StringVar()
+        self.err_var = tk.StringVar()
+        self.band_var = tk.StringVar()
+
+        ttk.Label(mapping, text="JD/HJD:").grid(row=0, column=0, sticky="w")
+        self.jd_cb = ttk.Combobox(mapping, textvariable=self.jd_var, state="readonly", width=24)
+        self.jd_cb.grid(row=0, column=1, pady=2)
+
+        ttk.Label(mapping, text="Magnitude:").grid(row=1, column=0, sticky="w")
+        self.mag_cb = ttk.Combobox(mapping, textvariable=self.mag_var, state="readonly", width=24)
+        self.mag_cb.grid(row=1, column=1, pady=2)
+
+        ttk.Label(mapping, text="Mag Error (opt.):").grid(row=2, column=0, sticky="w")
+        self.err_cb = ttk.Combobox(mapping, textvariable=self.err_var, state="readonly", width=24)
+        self.err_cb.grid(row=2, column=1, pady=2)
+
+        ttk.Label(mapping, text="Band/Filter (opt.):").grid(row=3, column=0, sticky="w")
+        self.band_cb = ttk.Combobox(mapping, textvariable=self.band_var, state="readonly", width=24)
+        self.band_cb.grid(row=3, column=1, pady=2)
+
+        # Band selector (values from column, if present)
+        bandrow = ttk.Frame(left)
+        bandrow.grid(row=4, column=0, sticky="ew")
+        ttk.Label(bandrow, text="Use band:").grid(row=0, column=0, sticky="w")
+        self.band_filter_var = tk.StringVar(value="ALL")
+        self.band_filter_cb = ttk.Combobox(bandrow, textvariable=self.band_filter_var, state="readonly", width=12, values=["ALL"]) 
+        self.band_filter_cb.grid(row=0, column=1, padx=(6,0))
+
+        # Data cleaning
+        clean = ttk.LabelFrame(left, text="Cleaning")
+        clean.grid(row=5, column=0, sticky="ew", pady=6)
+        ttk.Label(clean, text="Bad Mag value:").grid(row=0, column=0)
+        self.badmag_var = tk.StringVar(value="99.999")
+        ttk.Entry(clean, textvariable=self.badmag_var, width=10).grid(row=0, column=1, padx=4)
+        self.drop_limits_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(clean, text="Drop '<x' upper limits", variable=self.drop_limits_var).grid(row=1, column=0, columnspan=2, sticky="w", pady=2)
+
+        # ---- Right: params + plot ----
+        params = ttk.LabelFrame(right, text="Parameters & Plot")
+        params.grid(row=0, column=0, sticky="ew")
+
+        # Entries for t_peak, m_peak, t2, manual_tpeak_before
+        self.tpeak_var = tk.StringVar(value="")
+        self.mpeak_var = tk.StringVar(value="")
+        self.t2jd_var = tk.StringVar(value="")
+        self.manual_before_var = tk.StringVar(value="")
+        self.title_var = tk.StringVar(value="Light Curve")
+
+        r = 0
+        ttk.Label(params, text="t_peak JD:").grid(row=r, column=0, sticky="e")
+        ttk.Entry(params, textvariable=self.tpeak_var, width=16).grid(row=r, column=1, padx=6, pady=3, sticky="w"); r+=1
+        ttk.Label(params, text="m_peak:").grid(row=r, column=0, sticky="e")
+        ttk.Entry(params, textvariable=self.mpeak_var, width=16).grid(row=r, column=1, padx=6, pady=3, sticky="w"); r+=1
+        ttk.Label(params, text="t2 JD:").grid(row=r, column=0, sticky="e")
+        ttk.Entry(params, textvariable=self.t2jd_var, width=16).grid(row=r, column=1, padx=6, pady=3, sticky="w"); r+=1
+        ttk.Label(params, text="manual_tpeak_before (days, optional):").grid(row=r, column=0, sticky="e")
+        ttk.Entry(params, textvariable=self.manual_before_var, width=16).grid(row=r, column=1, padx=6, pady=3, sticky="w"); r+=1
+        ttk.Label(params, text="Plot title:").grid(row=r, column=0, sticky="e")
+        ttk.Entry(params, textvariable=self.title_var, width=32).grid(row=r, column=1, padx=6, pady=3, sticky="w"); r+=1
+
+        btnrow = ttk.Frame(params)
+        btnrow.grid(row=r, column=0, columnspan=2, pady=(6, 2), sticky="w"); r+=1
+        ttk.Button(btnrow, text="Plot", command=self.plot_current).grid(row=0, column=0, padx=(0,6))
+        ttk.Button(btnrow, text="Save PNG", command=self.save_png).grid(row=0, column=1)
+        ttk.Button(btnrow, text="Open large plot window", command=self.open_popup).grid(row=0, column=2, padx=(6,0))
+
+        # Toggle to connect points with a line
+        self.connect_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(params, text="Connect points with line", variable=self.connect_var).grid(row=r, column=0, columnspan=2, sticky="w"); r+=1
+
+        # Matplotlib canvas
+        fig = plt.Figure(figsize=(8, 5), dpi=100)
+        self.ax = fig.add_subplot(111)
+        self.canvas = FigureCanvasTkAgg(fig, master=right)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().grid(row=1, column=0, sticky="nsew", pady=(8,0))
+
+        toolbar_frame = ttk.Frame(right)
+        toolbar_frame.grid(row=2, column=0, sticky="ew")
+        NavigationToolbar2Tk(self.canvas, toolbar_frame)
+
+        # Console / debug output
+        console = ttk.LabelFrame(right, text="Uncertainty Output")
+        console.grid(row=3, column=0, sticky="ew", pady=8)
+        self.out = tk.Text(console, height=8, wrap="word")
+        self.out.grid(row=0, column=0, sticky="ew")
+
+    # ---------- Callbacks ----------
+    def open_files(self):
+        paths = filedialog.askopenfilenames(title="Open data file(s)",
+                                            filetypes=(
+                                                ("Data files", "*.csv *.txt *.dat"),
+                                                ("All files", "*.*"),
+                                            ))
+        if not paths:
+            return
+        for p in paths:
+            try:
+                df = _read_text_file(p)
+            except Exception as e:
+                messagebox.showerror("Read error", str(e))
+                continue
+
+            name = os.path.basename(p)
+            ds = DataSet(path=p, name=name, df=df)
+            self.datasets.append(ds)
+            self.lb.insert(tk.END, name)
+
+        # Select the last loaded dataset by default
+        if self.lb.size() > 0:
+            self.lb.select_clear(0, tk.END)
+            self.lb.select_set(tk.END)
+            self._on_select_dataset()
+
+    def remove_selected(self):
+        sel = self.lb.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        self.lb.delete(idx)
+        del self.datasets[idx]
+        if self.datasets:
+            new_idx = min(idx, len(self.datasets) - 1)
+            self.lb.select_set(new_idx)
+            self._on_select_dataset()
+        else:
+            self.current = None
+
+    def _on_select_dataset(self, event=None):
+        sel = self.lb.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        self.current = self.datasets[idx]
+
+        # Populate mapping comboboxes
+        df = self.current.df
+        guess = autodetect_columns(df)
+        cols = list(df.columns)
+        for cb, key in [(self.jd_cb, "jd"), (self.mag_cb, "mag"), (self.err_cb, "err"), (self.band_cb, "band")]:
+            cb["values"] = cols
+            if guess[key] is not None and guess[key] in cols:
+                cb.set(guess[key])
+            else:
+                cb.set("")
+
+        # Populate band filter dropdown
+        if guess["band"] is not None and guess["band"] in df.columns:
+            bands = ["ALL"] + sorted([str(x) for x in pd.unique(df[guess["band"]].astype(str)) if x != "nan"])
+        else:
+            bands = ["ALL"]
+        self.band_filter_cb["values"] = bands
+        self.band_filter_cb.set("ALL")
+
+    def _get_clean_series(self) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], str]:
+        if self.current is None:
+            raise RuntimeError("No dataset selected.")
+        df = self.current.df.copy()
+
+        jd_col = self.jd_var.get().strip()
+        mag_col = self.mag_var.get().strip()
+        err_col = self.err_var.get().strip() or None
+        band_col = self.band_var.get().strip() or None
+        band_pick = self.band_filter_var.get().strip()
+
+        if not jd_col or not mag_col:
+            raise RuntimeError("Please map the JD/HJD and Magnitude columns.")
+
+        # If band filter requested
+        if band_col and band_pick and band_pick != "ALL" and band_col in df.columns:
+            df = df[df[band_col].astype(str) == band_pick]
+
+        # Coerce strings like "<14.2" to NaN when dropping limits
+        if self.drop_limits_var.get():
+            def _num_only(x):
+                try:
+                    return float(str(x).replace(",", "."))
+                except Exception:
+                    # try strip leading comparator
+                    s = str(x).strip()
+                    s = s.replace("<", "").replace(">", "").replace("~", "")
+                    try:
+                        return float(s)
+                    except Exception:
+                        return np.nan
+            df[mag_col] = df[mag_col].map(_num_only)
+
+        # Drop rows with NaN in JD or Mag
+        df = df[pd.notnull(df[jd_col]) & pd.notnull(df[mag_col])]
+
+        # Remove sentinel bad-magnitude if provided
+        bad_text = self.badmag_var.get().strip()
+        if bad_text:
+            try:
+                bad_val = float(bad_text)
+                df = df[df[mag_col] != bad_val]
+            except ValueError:
+                pass  # ignore invalid sentinel
+
+        jd = pd.to_numeric(df[jd_col], errors="coerce").values
+        mag = pd.to_numeric(df[mag_col], errors="coerce").values
+
+        if err_col and err_col in df.columns:
+            magerr = pd.to_numeric(df[err_col], errors="coerce").values
+        else:
+            magerr = None
+
+        # Sort by time
+        order = np.argsort(jd)
+        jd = jd[order]
+        mag = mag[order]
+        if magerr is not None:
+            magerr = (magerr[order] if len(magerr) == len(jd) else None)
+
+        label = self.current.name if band_pick == "ALL" else f"{self.current.name} [{band_pick}]"
+        return jd, mag, magerr, label
+
+    def plot_current(self):
+        try:
+            jd, mag, magerr, label = self._get_clean_series()
+        except Exception as e:
+            messagebox.showerror("Data error", str(e))
+            return
+
+        # Read numeric params
+        def _get_float(var: tk.StringVar, name: str) -> float:
+            s = var.get().strip()
+            if not s:
+                raise RuntimeError(f"Please enter {name}.")
+            try:
+                return float(s)
+            except ValueError:
+                raise RuntimeError(f"{name} must be a number.")
+
+        try:
+            tpeak_JD = _get_float(self.tpeak_var, "t_peak JD")
+            m_peak = _get_float(self.mpeak_var, "m_peak")
+            t2_JD = _get_float(self.t2jd_var, "t2 JD")
+        except Exception as e:
+            messagebox.showerror("Parameter error", str(e))
+            return
+
+        manual_before = None
+        s = self.manual_before_var.get().strip()
+        if s:
+            try:
+                manual_before = float(s)
+            except ValueError:
+                messagebox.showerror("Parameter error", "manual_tpeak_before must be numeric if provided.")
+                return
+
+        if jd.size < 2:
+            messagebox.showerror("Not enough data", "Need at least two time points.")
+            return
+
+        brackets = compute_brackets(jd, tpeak_JD, t2_JD, manual_before)
+
+        # Plot
+        make_plot(self.ax, jd, mag, magerr, tpeak_JD, m_peak, t2_JD, self.title_var.get().strip() or "Light Curve", brackets, label, connect_lines=self.connect_var.get())
+        self.canvas.draw()
+
+        # Remember last payload for pop-out and mirror if open
+        self._last_plot_payload = (
+            jd, mag, magerr, tpeak_JD, m_peak, t2_JD,
+            self.title_var.get().strip() or "Light Curve",
+            brackets, label, self.connect_var.get()
+        )
+        if self.popup_ax is not None and self.popup_canvas is not None and self.popup_win is not None and self.popup_win.winfo_exists():
+            make_plot(self.popup_ax, jd, mag, magerr, tpeak_JD, m_peak, t2_JD,
+                      self.title_var.get().strip() or "Light Curve", brackets, label,
+                      connect_lines=self.connect_var.get())
+            self.popup_canvas.draw()
+
+        # Print console text in the same style as your script
+        self.out.delete("1.0", tk.END)
+        self.out.insert(tk.END, "---- Asymmetric uncertainties (quadrature for t2) ----\n")
+        self.out.insert(tk.END, f"t_peak uncertainty: -{brackets['gap_before']:.5f} / +{brackets['gap_after']:.5f} days\n")
+        self.out.insert(tk.END, f"t2 uncertainty (computed, quadrature): -{brackets['t2_err_before']:.5f} / +{brackets['t2_err_after']:.5f} days\n")
+        self.out.insert(tk.END, f"t2 plotted bracket (between neighbouring observations): -{brackets['t2_plot_before']:.5f} / +{brackets['t2_plot_after']:.5f} days\n")
+        self.out.insert(tk.END, f"(Reference: quadrature t2 bracket used previously: -{brackets['t2_err_before']:.5f} / +{brackets['t2_err_after']:.5f} days)\n")
+
+        # Extra debug lines (like your printouts)
+        self.out.insert(tk.END, f"\n[debug] t2_JD = {t2_JD}\n")
+        self.out.insert(tk.END, f"[debug] t2_central (days since peak) = {brackets['t2_central']}\n")
+        # Find the nearest observation for t2 and show its days-since-peak for visibility
+        idx_t2 = int(np.argmin(np.abs(jd - t2_JD)))
+        self.out.insert(tk.END, f"[debug] nearest observation for t2: time[idx_t2] = {jd[idx_t2]} (idx={idx_t2}), days since peak = {jd[idx_t2] - tpeak_JD}\n")
+
+    def save_png(self):
+        if self.ax is None:
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".png",
+                                            filetypes=(("PNG", "*.png"), ("All files", "*.*")))
+        if not path:
+            return
+        fig = self.ax.figure
+        fig.savefig(path, dpi=200, bbox_inches='tight')
+        messagebox.showinfo("Saved", f"Plot saved to:\n{path}")
+
+
+    def open_popup(self):
+        # If already open, just focus it
+        if self.popup_win is not None and self.popup_win.winfo_exists():
+            self.popup_win.lift()
+            return
+
+        # Create new Toplevel window with its own Figure, Axes, Canvas, and Toolbar
+        self.popup_win = tk.Toplevel(self)
+        self.popup_win.title("Light Curve – Large View")
+        self.popup_win.geometry("1100x750")
+
+        fig = plt.Figure(figsize=(10, 6), dpi=100)
+        self.popup_ax = fig.add_subplot(111)
+        self.popup_canvas = FigureCanvasTkAgg(fig, master=self.popup_win)
+        self.popup_canvas.draw()
+        self.popup_canvas.get_tk_widget().pack(fill="both", expand=True)
+        NavigationToolbar2Tk(self.popup_canvas, self.popup_win)
+
+        def _on_close():
+            try:
+                if self.popup_win is not None and self.popup_win.winfo_exists():
+                    self.popup_win.destroy()
+            finally:
+                self.popup_win = None
+                self.popup_ax = None
+                self.popup_canvas = None
+        self.popup_win.protocol("WM_DELETE_WINDOW", _on_close)
+
+        # If we already have a plotted state, render it in the pop-out immediately
+        if self._last_plot_payload is not None:
+            jd, mag, magerr, tpeak_JD, m_peak, t2_JD, title, brackets, label, connect_lines = self._last_plot_payload
+            make_plot(self.popup_ax, jd, mag, magerr, tpeak_JD, m_peak, t2_JD, title, brackets, label, connect_lines=connect_lines)
+            self.popup_canvas.draw()
+
+
+if __name__ == "__main__":
+    # Tweak default fonts a touch for clarity
+    mpl.rcParams.update({'font.size': 10})
+    app = App()
+    app.mainloop()
