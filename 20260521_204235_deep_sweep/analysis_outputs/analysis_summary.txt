@@ -1,0 +1,116 @@
+COFFEE CHILLER SWEEP ANALYSIS
+==================================
+
+Run directory: C:\Users\Jmell\Dropbox\Research File\20260521_204235_deep_sweep
+Output directory: C:\Users\Jmell\Dropbox\Research File\20260521_204235_deep_sweep\analysis_outputs
+
+Base configuration
+------------------
+coffee_volume_mL: 300.0
+coffee_inlet_C: 85.0
+target_outlet_C: 5.0
+requested_flow_mL_s: 5.0
+tube_inner_d_mm: 4.57
+tube_outer_d_mm: 6.35
+coil_diameter_cm: 7.5
+turns: 40.0
+pitch_factor: 1.5
+ice_mass_g: 1000.0
+water_mass_g: 1000.0
+outer_h_W_m2K: 750.0
+vertical_drop_cm: 30.0
+center_rod_enabled: True
+rod_material: brass
+rod_diameter_mm: 12.0
+rod_fin_boost_percent: 12.0
+
+Dataset sizes
+-------------
+deep_sweep rows: 6216
+top_designs rows: 25
+Practical passing designs in deep_sweep: 266
+
+Best practical passing design
+-----------------------------
+Score: 2.5016
+Average outlet C: 4.9785
+Final outlet C: 4.9785
+Requested flow mL/s: 2.0
+Actual flow mL/s: 2.0
+Turns: 18.0
+Tube length m: 4.2446
+Coil diameter cm: 7.5
+Coil height cm: 17.145
+Outer h W/m^2/K: 1200.0
+Rod enabled: 0.0
+Pressure ratio: 0.0994
+Max gravity flow mL/s: 6.4564
+Final ice remaining g: 702.0898
+Warning count: 0.0
+Warnings: 
+
+Shortest practical passing design
+---------------------------------
+Score: 7.4928
+Average outlet C: 4.9328
+Final outlet C: 4.9328
+Requested flow mL/s: 2.0
+Actual flow mL/s: 2.0
+Turns: 12.0
+Tube length m: 4.1485
+Coil diameter cm: 11.0
+Coil height cm: 11.43
+Outer h W/m^2/K: 1200.0
+Rod enabled: 1.0
+Pressure ratio: 0.0974
+Max gravity flow mL/s: 6.5355
+Final ice remaining g: 705.8626
+Warning count: 1.0
+Warnings: Center rod is modeled as not touching coffee. Do not let brass/copper contact the coffee directly.
+
+Best design by flow rate
+------------------------
+ requested_flow_mL_s  average_outlet_C  turns  tube_length_m  coil_diameter_cm  outer_h_W_m2K  rod_enabled  pressure_ratio_requested  final_ice_remaining_g  passes_practical_filter
+                 2.0          4.978495   18.0       4.244614               7.5         1200.0        False                  0.099449             702.089850                     True
+                 3.0          4.873471   34.0       6.417026               6.0         1200.0        False                  0.399534             701.698857                     True
+                 4.0          4.981859   30.0       8.487112               9.0         1200.0        False                  0.848718             702.102373                    False
+                 5.0          4.921911   32.0       9.052919               9.0         1200.0        False                  1.319354             701.879193                    False
+                 6.0          4.921911   32.0       9.052919               9.0         1200.0        False                  1.801767             701.879193                    False
+                 8.0          4.921911   32.0       9.052919               9.0         1200.0        False                  2.956744             701.879193                    False
+                10.0          4.921911   32.0       9.052919               9.0         1200.0        False                  4.354538             701.879193                    False
+
+Brass/frozen rod matched comparison
+-----------------------------------
+Matched rod/no-rod design pairs: 3108
+Mean rod improvement in average outlet temp: 0.6541 C
+Median rod improvement in average outlet temp: 0.3547 C
+Max rod improvement in average outlet temp: 2.5529 C
+Mean extra ice remaining with rod: 1.5074 g
+
+Top 10 rod-help cases:
+ requested_flow_mL_s  turns  coil_diameter_cm  outer_h_W_m2K  avg_outlet_no_rod_C  avg_outlet_with_rod_C  rod_delta_avg_C  ice_remaining_no_rod_g  ice_remaining_with_rod_g  rod_extra_ice_remaining_g
+                10.0   12.0               6.0          750.0            42.093954              39.541039         2.552914              840.266103                834.704644                  -5.561459
+                10.0    8.0               9.0          750.0            42.119140              39.566273         2.552867              840.359870                834.798587                  -5.561283
+                10.0   10.0               7.5          750.0            40.657037              38.104878         2.552159              834.916641                829.357995                  -5.558647
+                 8.0   12.0              11.0          250.0            46.247145              43.696358         2.550786              855.727919                850.174383                  -5.553536
+                10.0   12.0              11.0          250.0            46.247145              43.696358         2.550786              855.727919                850.174383                  -5.553536
+                10.0   22.0               6.0          250.0            46.218387              43.667602         2.550785              855.620858                850.067326                  -5.553532
+                 8.0   22.0               6.0          250.0            46.218387              43.667602         2.550785              855.620858                850.067326                  -5.553532
+                 8.0   18.0               7.5          250.0            45.514358              42.964992         2.549366              852.999845                847.451596                  -5.548248
+                10.0   18.0               7.5          250.0            45.514358              42.964992         2.549366              852.999845                847.451596                  -5.548248
+                10.0   14.0               9.0          250.0            47.744832              45.199805         2.545027              861.303623                855.771527                  -5.532096
+
+Files written
+-------------
+C:\Users\Jmell\Dropbox\Research File\20260521_204235_deep_sweep\analysis_outputs\ranked_best_designs.csv
+C:\Users\Jmell\Dropbox\Research File\20260521_204235_deep_sweep\analysis_outputs\practical_passing_designs.csv
+C:\Users\Jmell\Dropbox\Research File\20260521_204235_deep_sweep\analysis_outputs\best_by_flow_rate.csv
+C:\Users\Jmell\Dropbox\Research File\20260521_204235_deep_sweep\analysis_outputs\best_short_tube_designs.csv
+C:\Users\Jmell\Dropbox\Research File\20260521_204235_deep_sweep\analysis_outputs\rod_comparison.csv
+C:\Users\Jmell\Dropbox\Research File\20260521_204235_deep_sweep\analysis_outputs\flow_summary.csv
+C:\Users\Jmell\Dropbox\Research File\20260521_204235_deep_sweep\analysis_outputs\pivot_min_outlet_by_turns_and_flow.csv
+C:\Users\Jmell\Dropbox\Research File\20260521_204235_deep_sweep\analysis_outputs\best_outlet_temp_vs_turns.png
+C:\Users\Jmell\Dropbox\Research File\20260521_204235_deep_sweep\analysis_outputs\pressure_ratio_vs_tube_length.png
+C:\Users\Jmell\Dropbox\Research File\20260521_204235_deep_sweep\analysis_outputs\outlet_temp_vs_tube_length.png
+C:\Users\Jmell\Dropbox\Research File\20260521_204235_deep_sweep\analysis_outputs\best_design_by_flow_rate.png
+C:\Users\Jmell\Dropbox\Research File\20260521_204235_deep_sweep\analysis_outputs\rod_effect_histogram.png
