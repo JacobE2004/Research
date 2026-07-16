@@ -7,11 +7,16 @@ import os
 import csv
 import io
 
-
+# ======================================================
 # Load Light Curve
-
-file_path = r"C:\Users\Jmell\Dropbox\Research File\Nova_targets\LMCN_Folder\LMCN_2020_11a_notanerruption\aavsodata_6a037713b757b.txt"
-
+# ======================================================
+file_path = r"C:\Users\Jmell\Dropbox\Research File\Nova_targets\LMCN_Folder\LMCN_2016_04a __\LMCN_2016_04a_OGLE.dat"
+# If running on WSL, convert Windows path to WSL path automatically
+if os.name == "posix" and file_path.startswith("C:"):
+    file_path = file_path.replace("C:\\", "/mnt/c/").replace("\\", "/")
+# If running on Windows, convert WSL path to Windows path
+elif os.name == "nt" and file_path.startswith("/mnt/c/"):
+    file_path = file_path.replace("/mnt/c/", "C:\\").replace("/", "\\")
 ext = os.path.splitext(file_path)[1].lower()
 
 def _is_float(x):
@@ -26,7 +31,6 @@ def read_header_based_file(file_path):
     Reads header-based files such as:
     - AAVSO .csv
     - AAVSO .txt that is really comma-separated
-    - Space-delimited files (like LMCN .dat files)
     - other delimited text files with headers
 
     Returns array with columns:
@@ -58,8 +62,6 @@ def read_header_based_file(file_path):
 
     sample = "\n".join(lines[:10])
 
-    # Try to detect delimiter
-    delim = None
     try:
         dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
         delim = dialect.delimiter
@@ -74,20 +76,11 @@ def read_header_based_file(file_path):
         elif "|" in header_line:
             delim = "|"
         else:
-            # Default to space-delimited if no other delimiter found
-            delim = None
+            raise ValueError("Could not detect delimiter in header-based file.")
 
-    # Parse rows based on detected delimiter
-    all_rows = []
-    if delim is not None:
-        # Use csv reader for known delimiters
-        reader = csv.reader(io.StringIO("\n".join(lines)), delimiter=delim)
-        all_rows = list(reader)
-    else:
-        # Space-delimited parsing (handles multiple spaces)
-        for line in lines:
-            row = line.split()
-            all_rows.append(row)
+    rows = []
+    reader = csv.reader(io.StringIO("\n".join(lines)), delimiter=delim)
+    all_rows = list(reader)
 
     if not all_rows:
         raise ValueError("No rows found in header-based file.")
@@ -116,17 +109,16 @@ def read_header_based_file(file_path):
         default=None
     )
     mag_idx = _find_col(
-        ["mag", "Magnitude", "magnitude", "Mag", "mag.", "mag_value", "averagemag"],
+        ["mag", "Magnitude", "magnitude", "Mag", "mag_value", "averagemag"],
         required=True
     )
     err_idx = _find_col(
-        ["mag_err", "Uncertainty", "uncertainty", "HQuncertainty", "+/-",
+        ["mag_err", "Uncertainty", "uncertainty", "HQuncertainty",
          "Mag Error", "magerror", "MagErr", "error", "err"],
         required=False,
         default=None
     )
 
-    rows = []
     for r in all_rows[1:]:
         if not r:
             continue
@@ -139,6 +131,11 @@ def read_header_based_file(file_path):
         m = str(r[mag_idx]).strip() if mag_idx is not None and mag_idx < len(r) else ""
         me = str(r[err_idx]).strip() if err_idx is not None and err_idx < len(r) else "0.05"
 
+        # Detect if this is an upper or lower limit before stripping markers
+        is_limit = False
+        if m.startswith(">") or m.startswith("<"):
+            is_limit = True
+        
         m = m.lstrip("><")
         me = me.lstrip("><")
 
@@ -148,7 +145,7 @@ def read_header_based_file(file_path):
         if me.lower() in ["null", "none", "nan", ""]:
             me = "0.05"
 
-        rows.append([t, filt, m, me])
+        rows.append([t, filt, m, me, str(is_limit)])
 
     raw = np.array(rows, dtype=str)
     if raw.size == 0:
@@ -183,6 +180,29 @@ def read_numeric_text_file(file_path):
     return raw
 
 # ======================================================
+# Format X-axis function
+# ======================================================
+def format_xaxis_days(ax, major_interval=100, minor_interval=25):
+    """
+    Format x-axis with major ticks every 'major_interval' days and 
+    minor ticks every 'minor_interval' days. Removes grid lines.
+    
+    Parameters:
+    -----------
+    ax : matplotlib axis object
+        The axis to format
+    major_interval : int
+        Spacing between major tick marks in days (default: 10)
+    minor_interval : int
+        Spacing between minor tick marks in days (default: 5)
+    """
+    from matplotlib.ticker import MultipleLocator
+    
+    ax.xaxis.set_major_locator(MultipleLocator(major_interval))
+    ax.xaxis.set_minor_locator(MultipleLocator(minor_interval))
+    ax.grid(False)
+
+# ======================================================
 # Choose parser automatically
 # ======================================================
 raw = None
@@ -207,22 +227,22 @@ if raw.ndim == 1:
 # Extract parsed columns
 # ======================================================
 raw_time = np.array([str(x).strip() for x in raw[:, 0]])
-raw_filter = np.array([str(x).strip() for x in raw[:, 1]])
 raw_mag  = np.array([str(x).strip().lstrip("><") for x in raw[:, 2]])
 raw_err  = np.array([str(x).strip().lstrip("><") for x in raw[:, 3]]) if raw.shape[1] > 3 else np.full_like(raw_mag, "0.05")
+raw_is_limit = np.array([x == 'True' for x in raw[:, 4]]) if raw.shape[1] > 4 else np.full(len(raw_mag), False)
 
 # Keep only rows where time and mag are numeric
 mask_numeric = np.array([_is_float(t) and _is_float(m) for t, m in zip(raw_time, raw_mag)])
 
 raw_time = raw_time[mask_numeric]
-raw_filter = raw_filter[mask_numeric]
 raw_mag = raw_mag[mask_numeric]
 raw_err = raw_err[mask_numeric]
+raw_is_limit = raw_is_limit[mask_numeric]
 
 time = raw_time.astype(float)
 Mag = raw_mag.astype(float)
 Magerr = np.array([float(x) if _is_float(x) else 0.05 for x in raw_err], dtype=float)
-filter_array = raw_filter  # Keep track of filters
+is_limit = raw_is_limit.copy()
 
 if Mag.size > 0 and np.all(np.isnan(Mag)):
     print("Warning: all magnitude entries are NaN (file may contain only 'null' values).")
@@ -230,44 +250,21 @@ if Mag.size > 0 and np.all(np.isnan(Mag)):
 if time.size == 0:
     raise ValueError("No numeric time/magnitude data found in the file after parsing.")
 
-# ======================================================
-# FILTER SELECTION - Handle multi-filter files
-# ======================================================
-unique_filters = np.unique(filter_array)
-print(f"\nAvailable filters: {unique_filters}")
-if len(unique_filters) > 1:
-    selected_filter = input(f"Select filter to plot (options: {', '.join(unique_filters)}): ").strip().upper()
-    if selected_filter not in unique_filters:
-        print(f"Warning: '{selected_filter}' not found. Using '{unique_filters[0]}'")
-        selected_filter = unique_filters[0]
-else:
-    selected_filter = unique_filters[0]
+# Remove bad data points: defined as finite values in time and magnitude
+good = np.isfinite(time) & np.isfinite(Mag)
 
-# Filter data to selected filter only
-filter_mask = (filter_array == selected_filter)
-time = time[filter_mask]
-Mag = Mag[filter_mask]
-Magerr = Magerr[filter_mask]
-filter_array = filter_array[filter_mask]
+if not np.any(good):
+    raise ValueError("No valid numeric data after cleaning NaN/Inf values.")
 
-print(f"Using filter: {selected_filter}")
-print(f"Data points for {selected_filter}: {len(time)}")
-
-# Remove bad data points
-good = (Mag != 99.990)
 time = time[good]
 Mag = Mag[good]
 Magerr = Magerr[good]
-filter_array = filter_array[good]
-
-# Separate valid and upper limit points
-valid = ~np.isclose(Magerr, 99.990, atol=1e-6)
-upper_limit = np.isclose(Magerr, 99.990, atol=1e-6)
+is_limit = is_limit[good]
 
 # User-set values
-tpeak_JD = 2459171.670457 
-m_peak = 9.936
-t2_JD = 8197.10268
+tpeak_JD = 2457637.89406
+m_peak = 16.662
+t2_JD = 2456015.870
 
 # Shift for plotting
 time_shifted = time - tpeak_JD
@@ -275,22 +272,98 @@ time_shifted = time - tpeak_JD
 # ============================
 # Manual overrides for t_peak bracket
 # ============================
-manual_tpeak_prev = 2460524.62531
-manual_tpeak_next = 2460528.67884
+manual_tpeak_prev = 2456011.62340
+manual_tpeak_next = 2456014.55166
 
 # Manual t2 bracket
-manual_t2_prev = 2460524.62531
-manual_t2_next = 2460528.67884
+manual_t2_prev = 2456015.58192
+manual_t2_next = 2456016.58763
 
-# Calculate t2 time shift for plotting
+# ======================================================
+# t_peak UNCERTAINTY (using delta difference method)
+# ======================================================
+
+i_after = np.searchsorted(time, tpeak_JD)
+i_before = i_after - 1
+
+if manual_tpeak_prev is not None and manual_tpeak_next is not None:
+    t_prev = manual_tpeak_prev
+    t_next = manual_tpeak_next
+else:
+    if i_before < 0:
+        t_prev = tpeak_JD
+        t_next = time[0]
+    elif i_after >= len(time):
+        t_prev = time[-1]
+        t_next = tpeak_JD
+    else:
+        t_prev = time[i_before]
+        t_next = time[i_after]
+
+delta_t_before = tpeak_JD - t_prev
+delta_t_after = t_next - tpeak_JD
+tpeak_err = 0.5 * (delta_t_after - delta_t_before)
+
+tpeak_plot_before = abs(delta_t_before)
+tpeak_plot_after = abs(delta_t_after)
+
+# ======================================================
+# t2 UNCERTAINTY (manual bracket + delta difference method)
+# ======================================================
+
+if manual_t2_prev is not None and manual_t2_next is not None:
+    t2_prev = manual_t2_prev
+    t2_next = manual_t2_next
+else:
+    idx_t2 = np.argmin(np.abs(time - t2_JD))
+    if idx_t2 == 0:
+        t2_prev = t2_JD
+        t2_next = time[1]
+    elif idx_t2 == len(time) - 1:
+        t2_prev = time[-2]
+        t2_next = t2_JD
+    else:
+        t2_prev = time[idx_t2 - 1]
+        t2_next = time[idx_t2 + 1]
+
+delta_t2_before = t2_JD - t2_prev
+delta_t2_after = t2_next - t2_JD
+t2_internal_err = 0.5 * (delta_t2_after - delta_t2_before)
+
+t2_total_err = np.sqrt(t2_internal_err**2 + tpeak_err**2)
 t2_central = t2_JD - tpeak_JD
 
-#Toggle for connecting data points with a line
-connect_line = input("Connect data points with a line? (y/n): ").strip().lower() == 'y'
+# Extract filter column for multi-filter analysis
+raw_filter = np.array([str(x).strip() for x in raw[mask_numeric, 1]])
+unique_filters = np.unique(raw_filter[raw_filter != 'NA'])
 
+# Default: do not connect data points with a line
+connect_line = False
 
+# Default: use all filters for analysis
+if len(unique_filters) > 0:
+    print(f"Available filters: {unique_filters}")
+selected_filter = 'all'
+
+if selected_filter.lower() == 'all':
+    # Use all data
+    time_to_plot = time_shifted
+    mag_to_plot = Mag
+    err_to_plot = Magerr
+    is_limit_to_plot = is_limit
+    plot_title = "LMCN-2016-04a"
+else:
+    # Filter to specific filter
+    filt_mask = raw_filter == selected_filter
+    time_to_plot = time_shifted[filt_mask]
+    mag_to_plot = Mag[filt_mask]
+    err_to_plot = Magerr[filt_mask]
+    is_limit_to_plot = is_limit[filt_mask]
+    plot_title = f"LMCN-2019-11a - Filter {selected_filter}"
+
+# ======================================================
 # PLOT
-
+# ======================================================
 
 x_label_fontsize = 20
 y_label_fontsize = 20
@@ -298,41 +371,37 @@ y_label_fontsize = 20
 plt.figure(figsize=(16, 9))
 ax = plt.gca()
 
-ax.plot(
-    time_shifted[valid],
-    Mag[valid],
-    '-o' if connect_line else 'o',
-    color='green',
-    markersize=6,
-    label="Valid data",
-)
+# Separate regular detections from upper/lower limits
+detection_mask = ~is_limit_to_plot
+limit_mask = is_limit_to_plot
 
-if np.any(upper_limit):
-    ax.scatter(
-        time_shifted[upper_limit],
-        Mag[upper_limit],
-        marker='v',
-        color='black',
-        s=36,
-        label="Upper limits",
-    )
+# Plot the regular data points
+if connect_line:
+    if np.any(detection_mask):
+        plt.plot(time_to_plot[detection_mask], mag_to_plot[detection_mask], 'o-', color='blue', label='Magnitude Data')
+    if np.any(limit_mask):
+        plt.plot(time_to_plot[limit_mask], mag_to_plot[limit_mask], 'v', color='black', markersize=8, label='Upper Limits')
+else:
+    if np.any(detection_mask):
+        plt.errorbar(time_to_plot[detection_mask], mag_to_plot[detection_mask], yerr=err_to_plot[detection_mask], fmt='o', color='blue', label='Magnitude Data')
+    if np.any(limit_mask):
+        plt.plot(time_to_plot[limit_mask], mag_to_plot[limit_mask], 'v', color='black', markersize=8, label='Upper Limits')
 
+# Add peak magnitude to legend (no line on plot)
+plt.plot([], [], ' ', label=f'Peak Magnitude: {m_peak}')
 
 plt.gca().invert_yaxis()
-
-
-
-# Add peak magnitude value to legend without plotting line
-ax.plot([], [], ' ', label=f"m_peak = {m_peak:.3f}")
-
 plt.ylim(23, 10)
 plt.xlim(-60, 120)
 
-ax.set_xlabel("Days since peak brightness", fontsize=x_label_fontsize)
 ax.set_ylabel("Optical Brightness (mag)", fontsize=y_label_fontsize)
-ax.set_title("LMCN-2020-11a", fontsize=20)
+ax.set_xlabel("Time (days since peak)", fontsize=x_label_fontsize)
+ax.set_title(plot_title, fontsize=20)
 
 plt.legend(fontsize=13, loc='upper right')
-plt.grid(False)
+format_xaxis_days(ax, major_interval=20, minor_interval=10)
 plt.tight_layout()
 plt.show()
+
+
+
